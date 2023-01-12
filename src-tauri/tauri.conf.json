@@ -60,10 +60,10 @@
     "windows": [
       {
         "fullscreen": false,
-        "height": 600,
+        "height": 1080,
         "resizable": true,
         "title": "AOF Downloader",
-        "width": 800
+        "width": 1920
       }
     ]
   }

@@ -12,15 +12,8 @@
 </script>
 
 <div>
-    <div class="row">
-        <Textfield bind:value label="Modpack Path" style="flex-grow: 1"></Textfield>
+    <div class="flex flex-row items-center gap-5">
+        <Textfield class="flex-grow" bind:value label="Modpack Path"></Textfield>
         <Button on:click={select} disabled="{!valid}">Begin</Button>
     </div>
 </div>
-
-<style>
-    .row {
-        gap: 10px;
-        align-items: center;
-    }
-</style>
