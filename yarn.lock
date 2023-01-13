@@ -581,6 +581,15 @@
     "@smui/common" "^7.0.0-beta.0"
     svelte2tsx "^0.5.12"
 
+"@smui/linear-progress@^7.0.0-beta.0":
+  version "7.0.0-beta.0"
+  resolved "https://registry.yarnpkg.com/@smui/linear-progress/-/linear-progress-7.0.0-beta.0.tgz#0eb670adcc0c01944bb1307252ee2b2152e0e83e"
+  integrity sha512-TQmhnV0lpkm99accBhmCNl9PSpI88K7FNIWvA3TtZLb7RRfi+KDWNt8DDpGMqJHPXH8a/sTiu9Dn4JxJGE1CMQ==
+  dependencies:
+    "@material/linear-progress" "^14.0.0"
+    "@smui/common" "^7.0.0-beta.0"
+    svelte2tsx "^0.5.12"
+
 "@smui/list@^7.0.0-beta.0":
   version "7.0.0-beta.0"
   resolved "https://registry.yarnpkg.com/@smui/list/-/list-7.0.0-beta.0.tgz#a2fe1903f7ff826937e534ed61c4c55a43696120"
@@ -695,6 +704,11 @@
     sirv "^2.0.2"
     tiny-glob "^0.2.9"
     undici "5.14.0"
+
+"@sveltejs/svelte-virtual-list@^3.0.1":
+  version "3.0.1"
+  resolved "https://registry.yarnpkg.com/@sveltejs/svelte-virtual-list/-/svelte-virtual-list-3.0.1.tgz#3784d6426508836b4471bba8ba293430e73717d8"
+  integrity sha512-aF9TptS7NKKS7/TqpsxQBSDJ9Q0XBYzBehCeIC5DzdMEgrJZpIYao9LRLnyyo6SVodpapm2B7FE/Lj+FSA5/SQ==
 
 "@sveltejs/vite-plugin-svelte@^2.0.0":
   version "2.0.2"

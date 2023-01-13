@@ -1,22 +1,28 @@
+#![feature(is_some_with)]
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
 )]
 
-// Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+#[macro_use]
+extern crate anyhow;
 
-#[tauri::command]
-fn modpack_select(value: &str) {
-    println!("Selected value: {}", value);
-}
+use std::sync::Arc;
+
+mod download;
+mod json;
+mod select;
+mod utils;
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![greet, modpack_select])
+        .manage(Arc::new(download::DownloaderState::new()))
+        .invoke_handler(tauri::generate_handler![
+            select::modpack_select,
+            select::path_is_valid,
+            download::get_status,
+            download::human_bytes,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
