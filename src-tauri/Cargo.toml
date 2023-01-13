@@ -1,12 +1,12 @@
 [package]
 name = "aof-downloader"
-version = "0.0.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+version = "0.1.0"
+description = "Simple Tauri app to download All Of Fabric modpacks"
+authors = ["Kneelawk <kneelawk@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/Kneelawk/aof-downloader.git"
 edition = "2021"
-rust-version = "1.57"
+rust-version = "1.66.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

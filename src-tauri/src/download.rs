@@ -667,7 +667,7 @@ async fn download_file_part(
         }
     }
 
-    if length.is_some_and(|&length| downloaded < length) {
+    if length.is_some_and(|length| downloaded < length) {
         bail!("Incomplete download");
     }
 

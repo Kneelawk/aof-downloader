@@ -1,4 +1,4 @@
-#![feature(is_some_with)]
+#![feature(is_some_and)]
 #![cfg_attr(
     all(not(debug_assertions), target_os = "windows"),
     windows_subsystem = "windows"
