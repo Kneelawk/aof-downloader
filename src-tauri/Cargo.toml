@@ -1,6 +1,6 @@
 [package]
 name = "aof-downloader"
-version = "0.1.0"
+version = "0.1.1"
 description = "Simple Tauri app to download All Of Fabric modpacks"
 authors = ["Kneelawk <kneelawk@gmail.com>"]
 license = "MIT"

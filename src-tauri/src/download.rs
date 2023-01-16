@@ -23,6 +23,7 @@ use tokio::time::timeout;
 use tokio::{fs, io};
 
 const MAX_CONCURRENT_DOWNLOADS: usize = 100;
+const MAX_CONCURRENT_EXTRACTIONS: usize = 100;
 
 #[tauri::command]
 pub async fn get_status(
@@ -154,6 +155,8 @@ async fn extract_overrides(
     let extraction_count = Arc::new(AtomicUsize::new(0));
     let mut futures: FuturesUnordered<JoinHandle<anyhow::Result<()>>> = FuturesUnordered::new();
 
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_EXTRACTIONS));
+
     for index in 0..entries.len() {
         let entry = entries[index];
         let entry_filename = entry.filename().replace('\\', "/");
@@ -166,8 +169,14 @@ async fn extract_overrides(
         let output_path = output_path.clone();
         let extraction_count = extraction_count.clone();
         let canceled = canceled.clone();
+        let semaphore = semaphore.clone();
 
         futures.push(tokio::spawn(async move {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .context("Error acquiring semaphore permit")?;
+
             if canceled.load(Ordering::Acquire) {
                 return Ok(());
             }
@@ -424,9 +433,9 @@ async fn download_mods(
                 .await
                 .context("Error acquiring semaphore permit")?;
 
-            if cancelled.load(Ordering::Acquire) {
-                return Ok(());
-            }
+            // if cancelled.load(Ordering::Acquire) {
+            //     return Ok(());
+            // }
 
             let download_url = &file.download_url;
             let url = Url::from_str(download_url)
@@ -489,23 +498,23 @@ async fn download_file(
     let mut offset = 0u64;
 
     loop {
-        if cancelled.load(Ordering::Acquire) {
-            statuses
-                .put(
-                    &handle,
-                    FileStatus::from_str(
-                        url.as_str(),
-                        "Cancelled.",
-                        true,
-                        offset,
-                        full_length.unwrap_or(0),
-                        false,
-                    ),
-                )
-                .await;
-
-            return Ok(());
-        }
+        // if cancelled.load(Ordering::Acquire) {
+        //     statuses
+        //         .put(
+        //             &handle,
+        //             FileStatus::from_str(
+        //                 url.as_str(),
+        //                 "Cancelled.",
+        //                 true,
+        //                 offset,
+        //                 full_length.unwrap_or(0),
+        //                 false,
+        //             ),
+        //         )
+        //         .await;
+        //
+        //     return Ok(());
+        // }
 
         let res = download_file_part(
             client.clone(),
