@@ -7,6 +7,9 @@
 #[macro_use]
 extern crate anyhow;
 
+#[macro_use]
+extern crate log;
+
 use std::sync::Arc;
 
 mod download;
@@ -15,6 +18,9 @@ mod select;
 mod utils;
 
 fn main() {
+    dotenv::dotenv().ok();
+    env_logger::init();
+
     tauri::Builder::default()
         .manage(Arc::new(download::DownloaderState::new()))
         .invoke_handler(tauri::generate_handler![

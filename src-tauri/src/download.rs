@@ -6,8 +6,10 @@ use bytes::{Buf, Bytes};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use indicatif::HumanBytes;
-use reqwest::{Client, Url};
+use reqwest::redirect::Policy;
+use reqwest::{Client, ClientBuilder, Url};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -19,11 +21,13 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio::{fs, io};
 
 const MAX_CONCURRENT_DOWNLOADS: usize = 100;
 const MAX_CONCURRENT_EXTRACTIONS: usize = 100;
+
+const DOWNLOAD_COOLDOWN: Duration = Duration::from_secs(5);
 
 #[tauri::command]
 pub async fn get_status(
@@ -52,7 +56,12 @@ impl DownloaderState {
     pub fn new() -> Self {
         Self {
             downloading: AtomicBool::new(false),
-            client: Arc::new(Client::new()),
+            client: Arc::new(
+                ClientBuilder::new()
+                    .redirect(Policy::none())
+                    .build()
+                    .expect("Fatal error initializing HTTP client"),
+            ),
             status_manager: Arc::new(FileStatusManager::new()),
         }
     }
@@ -71,7 +80,7 @@ impl DownloaderState {
                 }
                 Err(e) => {
                     handle.emit_all("download_error", e.to_string()).unwrap();
-                    eprintln!("{:?}", e);
+                    error!("{:?}", e);
                 }
             }
         }
@@ -87,7 +96,7 @@ impl DownloaderState {
                     .ok_or(anyhow!("Modpack file is missing .zip extension"))?,
             );
 
-        println!("Extracting modpack to: {}", output_path.to_string_lossy());
+        info!("Extracting modpack to: {}", output_path.to_string_lossy());
 
         let mods_path = output_path.join("mods");
 
@@ -104,13 +113,13 @@ impl DownloaderState {
         );
 
         // Extract overrides
-        println!("Extracting overrides...");
+        info!("Extracting overrides...");
         extract_overrides(handle.clone(), output_path, modpack_zip.clone())
             .await
             .context("Error extracting overrides")?;
 
         // Read manifest
-        println!("Reading manifest...");
+        info!("Reading manifest...");
         let (manifest_index, _manifest_entry) = modpack_zip
             .entry("manifest.json")
             .context("Error finding manifest")?;
@@ -126,7 +135,7 @@ impl DownloaderState {
             serde_json::from_str(&manifest_str).context("Error parsing manifest")?;
 
         // Download mods in manifest
-        println!("Downloading mods...");
+        info!("Downloading mods...");
         download_mods(
             self.client.clone(),
             handle,
@@ -137,7 +146,7 @@ impl DownloaderState {
         .await
         .context("Error downloading mods")?;
 
-        println!("Done.");
+        info!("Done.");
 
         Ok(())
     }
@@ -149,7 +158,8 @@ async fn extract_overrides(
     modpack_zip: Arc<ZipFileReader>,
 ) -> anyhow::Result<()> {
     let entries = modpack_zip.entries();
-    handle.emit_all("extraction_total", entries.len()).unwrap();
+    let entry_count = entries.len();
+    handle.emit_all("extraction_total", entry_count).unwrap();
 
     let canceled = Arc::new(AtomicBool::new(false));
     let extraction_count = Arc::new(AtomicUsize::new(0));
@@ -157,7 +167,7 @@ async fn extract_overrides(
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_EXTRACTIONS));
 
-    for index in 0..entries.len() {
+    for index in 0..entry_count {
         let entry = entries[index];
         let entry_filename = entry.filename().replace('\\', "/");
         if !entry_filename.starts_with("overrides/") && !entry_filename.starts_with("/overrides/") {
@@ -232,11 +242,7 @@ async fn extract_overrides(
                         format!("Error writing to file {}", extract_path.to_string_lossy())
                     })
                     .cancel(&canceled)?;
-
-                // Send the update
-                let extraction_count = extraction_count.fetch_add(1, Ordering::AcqRel) + 1;
-                handle.emit_all("extraction_cur", extraction_count).unwrap();
-            } else if !fs::metadata(&extract_path).await.is_ok() {
+            } else if fs::metadata(&extract_path).await.is_err() {
                 fs::create_dir_all(&extract_path)
                     .await
                     .with_context(|| {
@@ -244,6 +250,11 @@ async fn extract_overrides(
                     })
                     .cancel(&canceled)?;
             }
+
+            // Send the update
+            let extraction_count = extraction_count.fetch_add(1, Ordering::AcqRel) + 1;
+            handle.emit_all("extraction_cur", extraction_count).unwrap();
+            debug!("# Extracted {}/{}", extraction_count, entry_count);
 
             Ok(())
         }));
@@ -417,6 +428,8 @@ async fn download_mods(
     let files_complete = Arc::new(AtomicUsize::new(0));
     let mut futures = FuturesUnordered::<JoinHandle<anyhow::Result<()>>>::new();
 
+    let total_mods = manifest.files.len();
+
     for file in manifest.files.iter() {
         let client = client.clone();
         let handle = handle.clone();
@@ -432,10 +445,6 @@ async fn download_mods(
                 .acquire()
                 .await
                 .context("Error acquiring semaphore permit")?;
-
-            // if cancelled.load(Ordering::Acquire) {
-            //     return Ok(());
-            // }
 
             let download_url = &file.download_url;
             let url = Url::from_str(download_url)
@@ -466,6 +475,7 @@ async fn download_mods(
                 &mut writer,
                 Duration::from_secs(20),
                 files_complete,
+                total_mods,
                 cancelled.clone(),
             )
             .await
@@ -492,34 +502,61 @@ async fn download_file(
     output: &mut File,
     conn_timeout: Duration,
     files_complete: Arc<AtomicUsize>,
+    total_mods: usize,
     cancelled: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
+    let mut final_url = Cow::Borrowed(url);
+
+    // Follow the redirects to a server that can actually support range requests
+    loop {
+        let res = find_redirect(
+            client.clone(),
+            handle.clone(),
+            statuses.clone(),
+            &final_url,
+            url,
+            conn_timeout,
+            cancelled.clone(),
+        )
+        .await;
+
+        match res {
+            Ok(Ok(RedirectResult::NoRedirect)) => break,
+            Ok(Ok(RedirectResult::Redirected(redirect))) => {
+                final_url = Cow::Owned(redirect);
+            }
+            Ok(res) => {
+                res.with_context(|| format!("Error finding mod file {}", url))
+                    .cancel(&cancelled)?;
+            }
+            Err(err) => {
+                statuses
+                    .put(
+                        &handle,
+                        FileStatus::from_string(url.as_str(), err.to_string(), true, 0, 0, false),
+                    )
+                    .await;
+                debug!(
+                    "# Finding {} handling error: {:?}\nWaiting for connection to cool down...",
+                    &url, err
+                );
+                sleep(DOWNLOAD_COOLDOWN).await;
+            }
+        }
+    }
+
+    debug!("# Final redirected url: '{}' -> '{}'", url, &final_url);
+
     let mut full_length = None;
     let mut offset = 0u64;
 
+    // Do the actual download
     loop {
-        // if cancelled.load(Ordering::Acquire) {
-        //     statuses
-        //         .put(
-        //             &handle,
-        //             FileStatus::from_str(
-        //                 url.as_str(),
-        //                 "Cancelled.",
-        //                 true,
-        //                 offset,
-        //                 full_length.unwrap_or(0),
-        //                 false,
-        //             ),
-        //         )
-        //         .await;
-        //
-        //     return Ok(());
-        // }
-
         let res = download_file_part(
             client.clone(),
             handle.clone(),
             statuses.clone(),
+            &final_url,
             url,
             output,
             conn_timeout,
@@ -545,6 +582,11 @@ async fn download_file(
                         ),
                     )
                     .await;
+                debug!(
+                    "# Download {} handling error: {:?}\nWaiting for connection to cool down...",
+                    &url, err
+                );
+                sleep(DOWNLOAD_COOLDOWN).await;
             }
         }
     }
@@ -568,21 +610,30 @@ async fn download_file(
     let files_complete = files_complete.fetch_add(1, Ordering::AcqRel) + 1;
     handle.emit_all("file_complete", files_complete).unwrap();
 
+    debug!(
+        "# Downloaded mod '{}' with data: {}/{:?} mod {}/{}",
+        &url, offset, full_length, files_complete, total_mods
+    );
+
     Ok(())
 }
 
-async fn download_file_part(
+enum RedirectResult {
+    Redirected(Url),
+    NoRedirect,
+}
+
+async fn find_redirect(
     client: Arc<Client>,
     handle: AppHandle,
     statuses: Arc<FileStatusManager>,
     url: &Url,
-    output: &mut File,
+    display_url: &Url,
     conn_timeout: Duration,
-    full_length: &mut Option<u64>,
-    offset: &mut u64,
     cancelled: Arc<AtomicBool>,
-) -> anyhow::Result<anyhow::Result<()>> {
+) -> anyhow::Result<anyhow::Result<RedirectResult>> {
     if cancelled.load(Ordering::Acquire) {
+        info!("Cancelled {}", &url);
         return Ok(Err(anyhow!("Cancelled.")));
     }
 
@@ -590,7 +641,71 @@ async fn download_file_part(
         .put(
             &handle,
             FileStatus::from_str(
-                url.as_str(),
+                display_url.as_str(),
+                "Finding redirect...",
+                false,
+                0,
+                0,
+                false,
+            ),
+        )
+        .await;
+
+    let builder = client.head(url.clone());
+    let res = timeout(conn_timeout, builder.send())
+        .await
+        .context("Connection timeout")?
+        .context("Error connecting to server")?;
+
+    if res.status().is_client_error() || res.status().is_server_error() {
+        return Ok(Err(anyhow!(
+            "Server gave bad response code: {}",
+            res.status()
+        )));
+    }
+
+    if res.status().is_redirection() {
+        let redirect = res
+            .headers()
+            .get("location")
+            .ok_or(anyhow!(
+                "Server asked for redirect but didn't provide a location"
+            ))?
+            .to_str()
+            .context("Error parsing header value")?;
+        debug!("# Redirect found: '{}' -> '{}'", &url, redirect);
+
+        Ok(Ok(RedirectResult::Redirected(
+            Url::from_str(redirect).context("Error parsing redirect url")?,
+        )))
+    } else {
+        debug!("# No more redirects: '{}'", &url);
+        Ok(Ok(RedirectResult::NoRedirect))
+    }
+}
+
+async fn download_file_part(
+    client: Arc<Client>,
+    handle: AppHandle,
+    statuses: Arc<FileStatusManager>,
+    url: &Url,
+    display_url: &Url,
+    output: &mut File,
+    conn_timeout: Duration,
+    full_length: &mut Option<u64>,
+    offset: &mut u64,
+    cancelled: Arc<AtomicBool>,
+) -> anyhow::Result<anyhow::Result<()>> {
+    if cancelled.load(Ordering::Acquire) {
+        info!("Cancelled {}", &url);
+        return Ok(Err(anyhow!("Cancelled.")));
+    }
+
+    statuses
+        .put(
+            &handle,
+            FileStatus::from_str(
+                display_url.as_str(),
                 "Connecting...",
                 false,
                 *offset,
@@ -611,9 +726,7 @@ async fn download_file_part(
         .context("Connection timeout")?
         .context("Error connecting to server")?;
 
-    if (res.status().is_client_error() && res.status().as_u16() != 404)
-        || res.status().is_server_error()
-    {
+    if res.status().is_client_error() || res.status().is_server_error() {
         return Ok(Err(anyhow!(
             "Server gave bad response code: {}",
             res.status()
@@ -628,7 +741,7 @@ async fn download_file_part(
 
     let status = if let Some(length) = length {
         FileStatus::from_string(
-            url.as_str(),
+            display_url.as_str(),
             format!("Connected. Downloading: {}", HumanBytes(length)),
             false,
             *offset,
@@ -637,7 +750,7 @@ async fn download_file_part(
         )
     } else {
         FileStatus::from_str(
-            url.as_str(),
+            display_url.as_str(),
             "Connected.",
             false,
             *offset,
@@ -667,17 +780,38 @@ async fn download_file_part(
         statuses
             .put(
                 &handle,
-                FileStatus::from_empty(url.as_str(), *offset, full_length.unwrap_or(0), false),
+                FileStatus::from_empty(
+                    display_url.as_str(),
+                    *offset,
+                    full_length.unwrap_or(0),
+                    false,
+                ),
             )
             .await;
 
         if cancelled.load(Ordering::Acquire) {
+            info!("Cancelled {}", &url);
             return Ok(Err(anyhow!("Cancelled.")));
         }
     }
 
-    if length.is_some_and(|length| downloaded < length) {
+    if length.is_some_and(|length| downloaded < length)
+        || full_length.is_some_and(|full_length| *offset < full_length)
+    {
+        debug!(
+            "# Incomplete download {} {}/{} ({}/{})",
+            &url,
+            downloaded,
+            length.unwrap(),
+            offset,
+            full_length.unwrap()
+        );
         bail!("Incomplete download");
+    } else {
+        debug!(
+            "# Complete download {} {}/{:?} ({}/{:?})",
+            &url, downloaded, length, offset, full_length
+        );
     }
 
     Ok(Ok(()))
