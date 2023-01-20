@@ -38,7 +38,7 @@ pub async fn get_status(
         .status_manager
         .get(url)
         .await
-        .ok_or_else(|| format!("No state for {}", url))
+        .ok_or_else(|| format!("No state for {url}"))
 }
 
 #[tauri::command]
@@ -100,17 +100,15 @@ impl DownloaderState {
 
         let mods_path = output_path.join("mods");
 
-        if !fs::metadata(&mods_path).await.is_ok() {
+        if fs::metadata(&mods_path).await.is_err() {
             fs::create_dir_all(&mods_path)
                 .await
                 .context("Error creating downloaded 'mods' dir")?;
         }
 
-        let modpack_zip = Arc::new(
-            ZipFileReader::new(modpack_path)
-                .await
-                .context("Error opening modpack zip")?,
-        );
+        let modpack_zip = ZipFileReader::new(modpack_path)
+            .await
+            .context("Error opening modpack zip")?;
 
         // Extract overrides
         info!("Extracting overrides...");
@@ -120,15 +118,20 @@ impl DownloaderState {
 
         // Read manifest
         info!("Reading manifest...");
-        let (manifest_index, _manifest_entry) = modpack_zip
-            .entry("manifest.json")
-            .context("Error finding manifest")?;
-        let manifest_reader = modpack_zip
-            .entry_reader(manifest_index)
+        let (manifest_index, manifest_entry) = modpack_zip
+            .file()
+            .entries()
+            .iter()
+            .enumerate()
+            .find(|(_i, e)| e.entry().filename() == "manifest.json")
+            .ok_or(anyhow!("Error finding manifest"))?;
+        let mut manifest_reader = modpack_zip
+            .entry(manifest_index)
             .await
             .context("Error opening manifest")?;
-        let manifest_str = manifest_reader
-            .read_to_string_crc()
+        let mut manifest_str = String::new();
+        manifest_reader
+            .read_to_string_checked(&mut manifest_str, manifest_entry.entry())
             .await
             .context("Error reading manifest")?;
         let manifest: ManifestJson =
@@ -155,9 +158,9 @@ impl DownloaderState {
 async fn extract_overrides(
     handle: AppHandle,
     output_path: PathBuf,
-    modpack_zip: Arc<ZipFileReader>,
+    modpack_zip: ZipFileReader,
 ) -> anyhow::Result<()> {
-    let entries = modpack_zip.entries();
+    let entries = modpack_zip.file().entries();
     let entry_count = entries.len();
     handle.emit_all("extraction_total", entry_count).unwrap();
 
@@ -167,8 +170,8 @@ async fn extract_overrides(
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_EXTRACTIONS));
 
-    for index in 0..entry_count {
-        let entry = entries[index];
+    for (index, stored_entry) in entries.iter().enumerate() {
+        let entry = stored_entry.entry();
         let entry_filename = entry.filename().replace('\\', "/");
         if !entry_filename.starts_with("overrides/") && !entry_filename.starts_with("/overrides/") {
             continue;
@@ -192,11 +195,11 @@ async fn extract_overrides(
             }
 
             let mut entry_reader = modpack_zip
-                .entry_reader(index)
+                .entry(index)
                 .await
                 .context("Error reading zip entry")
                 .cancel(&canceled)?;
-            let entry = entry_reader.entry();
+            let entry = modpack_zip.get_entry(index)?;
 
             let entry_filename = entry.filename().replace('\\', "/");
             let extract_path = output_path.join(sanitize_override_path(&entry_filename));
@@ -212,7 +215,7 @@ async fn extract_overrides(
                         )
                     })
                     .cancel(&canceled)?;
-                if !fs::metadata(extract_parent).await.is_ok() {
+                if fs::metadata(extract_parent).await.is_err() {
                     fs::create_dir_all(extract_parent)
                         .await
                         .with_context(|| {
@@ -448,7 +451,7 @@ async fn download_mods(
 
             let download_url = &file.download_url;
             let url = Url::from_str(download_url)
-                .with_context(|| format!("Error parsing url {}", download_url))
+                .with_context(|| format!("Error parsing url {download_url}"))
                 .cancel(&cancelled)?;
             let filename = &download_url[download_url.rfind('/').unwrap_or(0) + 1..];
             let mod_path = mods_path.join(filename);
@@ -526,7 +529,7 @@ async fn download_file(
                 final_url = Cow::Owned(redirect);
             }
             Ok(res) => {
-                res.with_context(|| format!("Error finding mod file {}", url))
+                res.with_context(|| format!("Error finding mod file {url}"))
                     .cancel(&cancelled)?;
             }
             Err(err) => {
@@ -718,7 +721,7 @@ async fn download_file_part(
     let mut builder = client.get(url.clone());
 
     if *offset > 0u64 {
-        builder = builder.header("range", format!("bytes={}-", offset));
+        builder = builder.header("range", format!("bytes={offset}-"));
     }
 
     let res = timeout(conn_timeout, builder.send())
